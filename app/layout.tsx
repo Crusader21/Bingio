@@ -1,33 +1,17 @@
-import type { Metadata } from "next";
-import { Inter, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-export const metadata: Metadata = {
-  title: "MyAI3",
-  description: "MyAI3",
+export const metadata = {
+  title: "Bingio",
+  description: "Emotion-aware movie & series recommendation assistant",
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body
-        className={`${inter.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
+      <body className="bg-[#0B0B0C] text-white antialiased h-screen">
+        <div className="flex flex-col h-full w-full">
+          {children}
+        </div>
       </body>
     </html>
   );
