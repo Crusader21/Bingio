@@ -1,12 +1,21 @@
+// app/layout.tsx
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
+import { Inter, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({ subsets: ["latin"] });
+const inter = Inter({
+  variable: "--font-inter",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
 
 export const metadata: Metadata = {
-  title: "BINGIO | Emotionally Intelligent Recommendations",
-  description: "Watch what you feel. Built with ❤️ by Granth & Nikita.",
+  title: "Bingio — Emotion-aware movie recommendations",
+  description: "Bingio — an emotion-aware movie & series recommender",
 };
 
 export default function RootLayout({
@@ -15,11 +24,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
-      <body className={inter.className}>
-        <div className="flex flex-col min-h-screen relative">
-          {children}
-        </div>
+    <html lang="en" data-theme="movie">
+      <body className={`${inter.variable} ${geistMono.variable} antialiased`}>
+        {children}
       </body>
     </html>
   );
