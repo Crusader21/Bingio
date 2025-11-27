@@ -1,436 +1,255 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
-import styles from "./page.module.css"; // optional: if your project uses CSS modules; if not, global.css handles it
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller, useForm } from "react-hook-form";
+import { toast } from "sonner";
+import * as z from "zod";
 
-type Role = "assistant" | "user";
-type Msg = {
-  id: string;
-  role: Role;
-  text: string;
-  time?: string | null;
-  streaming?: boolean;
+import { Button } from "@/components/ui/button";
+import {
+  Field,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { useChat } from "@ai-sdk/react";
+import { ArrowUp, Eraser, Loader2, Plus, PlusIcon, Square } from "lucide-react";
+import { MessageWall } from "@/components/messages/message-wall";
+import { ChatHeader } from "@/app/parts/chat-header";
+import { ChatHeaderBlock } from "@/app/parts/chat-header";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { UIMessage } from "ai";
+import { useEffect, useState, useRef } from "react";
+import { AI_NAME, CLEAR_CHAT_TEXT, OWNER_NAME, WELCOME_MESSAGE } from "@/config";
+import Image from "next/image";
+import Link from "next/link";
+
+const formSchema = z.object({
+  message: z
+    .string()
+    .min(1, "Message cannot be empty.")
+    .max(2000, "Message must be at most 2000 characters."),
+});
+
+const STORAGE_KEY = 'chat-messages';
+
+type StorageData = {
+  messages: UIMessage[];
+  durations: Record<string, number>;
 };
 
-function nowTime() {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
+const loadMessagesFromStorage = (): { messages: UIMessage[]; durations: Record<string, number> } => {
+  if (typeof window === 'undefined') return { messages: [], durations: {} };
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (!stored) return { messages: [], durations: {} };
 
-export default function Page() {
-  const [messages, setMessages] = useState<Msg[]>([
-    {
-      id: "seed-1",
-      role: "assistant",
-      text: "Hello! I'm Bingio — tell me how you feel and who you're watching with, and I'll recommend a film or series for your vibe.",
-      time: nowTime(),
-      streaming: false,
-    },
-  ]);
+    const parsed = JSON.parse(stored);
+    return {
+      messages: parsed.messages || [],
+      durations: parsed.durations || {},
+    };
+  } catch (error) {
+    console.error('Failed to load messages from localStorage:', error);
+    return { messages: [], durations: {} };
+  }
+};
 
-  const [value, setValue] = useState("");
-  const listRef = useRef<HTMLDivElement | null>(null);
-  const abortControllers = useRef<Record<string, AbortController>>({});
+const saveMessagesToStorage = (messages: UIMessage[], durations: Record<string, number>) => {
+  if (typeof window === 'undefined') return;
+  try {
+    const data: StorageData = { messages, durations };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (error) {
+    console.error('Failed to save messages to localStorage:', error);
+  }
+};
 
-  // scroll-to-bottom after new messages
+export default function Chat() {
+  const [isClient, setIsClient] = useState(false);
+  const [durations, setDurations] = useState<Record<string, number>>({});
+  const welcomeMessageShownRef = useRef<boolean>(false);
+
+  const stored = typeof window !== 'undefined' ? loadMessagesFromStorage() : { messages: [], durations: {} };
+  const [initialMessages] = useState<UIMessage[]>(stored.messages);
+
+  const { messages, sendMessage, status, stop, setMessages } = useChat({
+    messages: initialMessages,
+  });
+
   useEffect(() => {
-    const el = listRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight + 9999;
-  }, [messages]);
+    setIsClient(true);
+    setDurations(stored.durations);
+    setMessages(stored.messages);
+  }, []);
 
-  function pushMessage(m: Msg) {
-    setMessages((s) => [...s, m]);
-  }
-
-  function replaceMessage(id: string, patch: Partial<Msg>) {
-    setMessages((s) => s.map((m) => (m.id === id ? { ...m, ...patch } : m)));
-  }
-
-  // send user message and call backend streaming endpoint
-  async function sendMessage(text: string) {
-    if (!text.trim()) return;
-    const userMsg: Msg = {
-      id: "u-" + crypto.randomUUID(),
-      role: "user",
-      text,
-      time: nowTime(),
-      streaming: false,
-    };
-    pushMessage(userMsg);
-    setValue("");
-
-    // create assistant placeholder that will be streamed into
-    const assistantId = "a-" + crypto.randomUUID();
-    const assistantPlaceholder: Msg = {
-      id: assistantId,
-      role: "assistant",
-      text: "",
-      time: null,
-      streaming: true,
-    };
-    pushMessage(assistantPlaceholder);
-
-    // prepare abort controller so user can start new convo or cancel
-    const ac = new AbortController();
-    abortControllers.current[assistantId] = ac;
-
-    try {
-      // POST to your existing route. The API in this repo expects streaming responses.
-      // If your route expects a different shape, adjust the JSON payload accordingly.
-      const resp = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messages: [
-            // you can send whole session for better context — minimal example sends only user message
-            { role: "user", content: text },
-          ],
-          // include any flags your backend expects:
-          stream: true,
-        }),
-        signal: ac.signal,
-      });
-
-      if (!resp.ok || !resp.body) {
-        // non-streaming fallback: show error text or try to parse json
-        const txt = await resp.text();
-        replaceMessage(assistantId, { text: txt || "Error: model did not return a response", time: nowTime(), streaming: false });
-        return;
-      }
-
-      // Stream the response (works for endpoints that return plain text chunks)
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let done = false;
-      let buffer = "";
-
-      while (!done) {
-        const { value: chunk, done: readerDone } = await reader.read();
-        if (readerDone) {
-          done = true;
-          break;
-        }
-        const str = decoder.decode(chunk, { stream: true });
-        // some streaming endpoints send JSON events (like SSE). If so, you may need to parse.
-        // This generic logic appends any plain text to the assistant bubble.
-        buffer += str;
-        // update assistant bubble with buffer
-        replaceMessage(assistantId, { text: buffer, streaming: true });
-      }
-
-      // finalize
-      replaceMessage(assistantId, { text: buffer, streaming: false, time: nowTime() });
-    } catch (err: any) {
-      if (err.name === "AbortError") {
-        replaceMessage(assistantId, { text: "[Generation cancelled]", streaming: false, time: nowTime() });
-      } else {
-        replaceMessage(assistantId, { text: `[Error: ${err?.message || "unknown"}]`, streaming: false, time: nowTime() });
-      }
-    } finally {
-      // cleanup controller
-      delete abortControllers.current[assistantId];
+  useEffect(() => {
+    if (isClient) {
+      saveMessagesToStorage(messages, durations);
     }
+  }, [durations, messages, isClient]);
+
+  const handleDurationChange = (key: string, duration: number) => {
+    setDurations((prevDurations) => {
+      const newDurations = { ...prevDurations };
+      newDurations[key] = duration;
+      return newDurations;
+    });
+  };
+
+  useEffect(() => {
+    if (isClient && initialMessages.length === 0 && !welcomeMessageShownRef.current) {
+      const welcomeMessage: UIMessage = {
+        id: `welcome-${Date.now()}`,
+        role: "assistant",
+        parts: [
+          {
+            type: "text",
+            text: WELCOME_MESSAGE,
+          },
+        ],
+      };
+      setMessages([welcomeMessage]);
+      saveMessagesToStorage([welcomeMessage], {});
+      welcomeMessageShownRef.current = true;
+    }
+  }, [isClient, initialMessages.length, setMessages]);
+
+  const form = useForm<z.infer<typeof formSchema>>({
+    resolver: zodResolver(formSchema),
+    defaultValues: {
+      message: "",
+    },
+  });
+
+  function onSubmit(data: z.infer<typeof formSchema>) {
+    sendMessage({ text: data.message });
+    form.reset();
   }
 
-  // keyboard handler
-  async function onSubmit(e?: React.FormEvent) {
-    if (e) e.preventDefault();
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    await sendMessage(trimmed);
-  }
-
-  // optional: cancel active streams (if user taps New)
-  function cancelActive() {
-    Object.values(abortControllers.current).forEach((ac) => ac.abort());
-    abortControllers.current = {};
+  function clearChat() {
+    const newMessages: UIMessage[] = [];
+    const newDurations = {};
+    setMessages(newMessages);
+    setDurations(newDurations);
+    saveMessagesToStorage(newMessages, newDurations);
+    toast.success("Chat cleared");
   }
 
   return (
-    <div className="app-shell">
-      <header className="app-header">
-        <div className="header-inner">
-          <div className="header-left">
-            <div className="header-avatar movie-avatar" title="Bingio">
-              <span className="logo-film">🎞️</span>
-            </div>
-            <div>
-              <div className="header-title">Chat with Bingio</div>
-              <div className="header-sub">Emotion-aware movie & series recommendations</div>
-            </div>
-          </div>
-
-          <div className="header-actions">
-            <button
-              className="btn-new"
-              onClick={() => {
-                cancelActive();
-                // reset conversation
-                setMessages([
-                  {
-                    id: "seed-1",
-                    role: "assistant",
-                    text: "Hello! I'm Bingio — tell me how you feel and who you're watching with, and I'll recommend a film or series for your vibe.",
-                    time: nowTime(),
-                    streaming: false,
-                  },
-                ]);
-                setValue("");
-              }}
-            >
-              + New
-            </button>
+    <div className="flex h-screen items-center justify-center font-sans dark:bg-black">
+      <main className="w-full dark:bg-black h-screen relative">
+        <div className="fixed top-0 left-0 right-0 z-50 bg-linear-to-b from-background via-background/50 to-transparent dark:bg-black overflow-visible pb-16">
+          <div className="relative overflow-visible">
+            <ChatHeader>
+              <ChatHeaderBlock />
+              <ChatHeaderBlock className="justify-center items-center">
+                <Avatar
+                  className="size-8 ring-1 ring-primary"
+                >
+                  <AvatarImage src="/logo.png" />
+                  <AvatarFallback>
+                    <Image src="/logo.png" alt="Logo" width={36} height={36} />
+                  </AvatarFallback>
+                </Avatar>
+                <p className="tracking-tight">Chat with {AI_NAME}</p>
+              </ChatHeaderBlock>
+              <ChatHeaderBlock className="justify-end">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="cursor-pointer"
+                  onClick={clearChat}
+                >
+                  <Plus className="size-4" />
+                  {CLEAR_CHAT_TEXT}
+                </Button>
+              </ChatHeaderBlock>
+            </ChatHeader>
           </div>
         </div>
-      </header>
-
-      <main className="main">
-        <div className="chat-column">
-          <div className="message-wall" ref={listRef}>
-            {messages.map((m) => (
-              <div key={m.id} className={`message-row ${m.role === "assistant" ? "assistant" : "user"}`}>
-                <div className="message-avatar">{m.role === "assistant" ? "B" : "Y"}</div>
-                <div className={`bubble ${m.role === "user" ? "bubble-user" : ""}`}>
-                  <div className="bubble-text">
-                    {/* Preserve line breaks from model */}
-                    {m.text.split("\n").map((line, i) => (
-                      <div key={i}>{line}</div>
-                    ))}
-                    {/* while streaming, show subtle dots */}
-                    {m.streaming ? (
-                      <span className="typing-dots" aria-hidden>
-                        <span className="dot" />
-                        <span className="dot" />
-                        <span className="dot" />
-                      </span>
-                    ) : null}
+        <div className="h-screen overflow-y-auto px-5 py-4 w-full pt-[88px] pb-[150px]">
+          <div className="flex flex-col items-center justify-end min-h-full">
+            {isClient ? (
+              <>
+                <MessageWall messages={messages} status={status} durations={durations} onDurationChange={handleDurationChange} />
+                {status === "submitted" && (
+                  <div className="flex justify-start max-w-3xl w-full">
+                    <Loader2 className="size-4 animate-spin text-muted-foreground" />
                   </div>
-                  <div className="meta">{m.time ?? ""}</div>
-                </div>
+                )}
+              </>
+            ) : (
+              <div className="flex justify-center max-w-2xl w-full">
+                <Loader2 className="size-4 animate-spin text-muted-foreground" />
               </div>
-            ))}
+            )}
+          </div>
+        </div>
+        <div className="fixed bottom-0 left-0 right-0 z-50 bg-linear-to-t from-background via-background/50 to-transparent dark:bg-black overflow-visible pt-13">
+          <div className="w-full px-5 pt-5 pb-1 items-center flex justify-center relative overflow-visible">
+            <div className="message-fade-overlay" />
+            <div className="max-w-3xl w-full">
+              <form id="chat-form" onSubmit={form.handleSubmit(onSubmit)}>
+                <FieldGroup>
+                  <Controller
+                    name="message"
+                    control={form.control}
+                    render={({ field, fieldState }) => (
+                      <Field data-invalid={fieldState.invalid}>
+                        <FieldLabel htmlFor="chat-form-message" className="sr-only">
+                          Message
+                        </FieldLabel>
+                        <div className="relative h-13">
+                          <Input
+                            {...field}
+                            id="chat-form-message"
+                            className="h-15 pr-15 pl-5 bg-card rounded-[20px]"
+                            placeholder="Type your message here..."
+                            disabled={status === "streaming"}
+                            aria-invalid={fieldState.invalid}
+                            autoComplete="off"
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" && !e.shiftKey) {
+                                e.preventDefault();
+                                form.handleSubmit(onSubmit)();
+                              }
+                            }}
+                          />
+                          {(status == "ready" || status == "error") && (
+                            <Button
+                              className="absolute right-3 top-3 rounded-full"
+                              type="submit"
+                              disabled={!field.value.trim()}
+                              size="icon"
+                            >
+                              <ArrowUp className="size-4" />
+                            </Button>
+                          )}
+                          {(status == "streaming" || status == "submitted") && (
+                            <Button
+                              className="absolute right-2 top-2 rounded-full"
+                              size="icon"
+                              onClick={() => {
+                                stop();
+                              }}
+                            >
+                              <Square className="size-4" />
+                            </Button>
+                          )}
+                        </div>
+                      </Field>
+                    )}
+                  />
+                </FieldGroup>
+              </form>
+            </div>
+          </div>
+          <div className="w-full px-5 py-3 items-center flex justify-center text-xs text-muted-foreground">
+            © {new Date().getFullYear()} {OWNER_NAME}&nbsp;<Link href="/terms" className="underline">Terms of Use</Link>&nbsp;Powered by&nbsp;<Link href="https://ringel.ai/" className="underline">Ringel.AI</Link>
           </div>
         </div>
       </main>
-
-      <div className="input-sticky">
-        <form className="input-bar" onSubmit={onSubmit}>
-          <input
-            placeholder="Describe your mood, who you're watching with, or ask anything..."
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            aria-label="Type your message"
-            autoFocus
-          />
-          <button type="submit" className="send-btn" aria-label="Send">
-            <span>🎬</span>
-          </button>
-        </form>
-      </div>
-
-      <footer className="footer-note">© 2025 Granth & Nikita · Terms of Use · Powered by Ringel.AI</footer>
-
-      <style jsx>{`
-        /* small scoped styles to avoid dependency changes — global.css will also apply */
-        .app-shell {
-          min-height: 100vh;
-          display: flex;
-          flex-direction: column;
-          background: var(--background, #fff);
-        }
-        .app-header {
-          border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-          padding: 16px 28px;
-          position: sticky;
-          top: 0;
-          background: var(--card, #fff);
-          z-index: 30;
-        }
-        .header-inner {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          max-width: 1200px;
-          margin: 0 auto;
-        }
-        .header-left {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-        .header-avatar {
-          width: 44px;
-          height: 44px;
-          border-radius: 999px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: var(--accent, #ef6f58);
-          color: white;
-          font-weight: 700;
-        }
-        .header-title {
-          font-weight: 700;
-          color: var(--foreground, #0f172a);
-        }
-        .header-sub {
-          font-size: 13px;
-          color: var(--muted-foreground, #667085);
-        }
-        .btn-new {
-          background: transparent;
-          border: 1px solid rgba(0, 0, 0, 0.06);
-          padding: 8px 12px;
-          border-radius: 8px;
-          cursor: pointer;
-        }
-
-        .main {
-          flex: 1;
-          display: flex;
-          justify-content: center;
-          padding: 22px;
-        }
-        .chat-column {
-          width: 100%;
-          max-width: 1100px;
-        }
-        .message-wall {
-          height: calc(100vh - 240px);
-          overflow: auto;
-          padding: 6px 12px;
-        }
-
-        .message-row {
-          display: flex;
-          align-items: flex-end;
-          gap: 12px;
-          margin: 18px 6px;
-        }
-        .message-row.user {
-          justify-content: flex-end;
-        }
-        .message-avatar {
-          width: 40px;
-          height: 40px;
-          border-radius: 999px;
-          background: #eef2ff;
-          color: #111827;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-weight: 700;
-        }
-
-        .bubble {
-          max-width: 820px;
-          background: #f3f7fb;
-          padding: 14px 18px;
-          border-radius: 12px;
-          position: relative;
-          box-shadow: 0 1px 0 rgba(16,24,40,0.03);
-        }
-        .bubble-user {
-          background: linear-gradient(135deg, #ef8a6a, #e26a4d);
-          color: white;
-        }
-        .bubble-text {
-          white-space: pre-wrap;
-          font-size: 16px;
-          line-height: 1.45;
-        }
-        .meta {
-          font-size: 12px;
-          color: #94a3b8;
-          margin-top: 8px;
-        }
-
-        .input-sticky {
-          position: sticky;
-          bottom: 18px;
-          left: 0;
-          right: 0;
-          display: flex;
-          justify-content: center;
-          padding: 0 24px 18px;
-        }
-        .input-bar {
-          width: 100%;
-          max-width: 1100px;
-          display: flex;
-          gap: 12px;
-          align-items: center;
-          background: rgba(255,255,255,0.9);
-          padding: 12px;
-          border-radius: 999px;
-          box-shadow: 0 8px 30px rgba(15,23,42,0.08);
-        }
-        .input-bar input {
-          width: 100%;
-          border: none;
-          outline: none;
-          padding: 12px 16px;
-          font-size: 16px;
-        }
-        .send-btn {
-          width: 52px;
-          height: 52px;
-          border-radius: 999px;
-          background: linear-gradient(135deg, #ef8a6a, #e26a4d);
-          border: none;
-          color: white;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 18px;
-        }
-
-        /* typing dots animation */
-        .typing-dots {
-          display: inline-flex;
-          gap: 6px;
-          margin-left: 8px;
-          align-items: center;
-        }
-        .typing-dots .dot {
-          width: 6px;
-          height: 6px;
-          background: #9aa4b2;
-          border-radius: 50%;
-          opacity: 0.9;
-          animation: blink 1s infinite ease-in-out;
-        }
-        .typing-dots .dot:nth-child(2) {
-          animation-delay: 0.12s;
-        }
-        .typing-dots .dot:nth-child(3) {
-          animation-delay: 0.24s;
-        }
-        @keyframes blink {
-          0% {
-            transform: translateY(0);
-            opacity: 0.18;
-          }
-          50% {
-            transform: translateY(-4px);
-            opacity: 1;
-          }
-          100% {
-            transform: translateY(0);
-            opacity: 0.18;
-          }
-        }
-
-        .footer-note {
-          padding: 18px;
-          text-align: center;
-          color: #6b7280;
-          font-size: 13px;
-        }
-      `}</style>
-    </div>
+    </div >
   );
 }
