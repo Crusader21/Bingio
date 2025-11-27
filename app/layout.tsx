@@ -1,17 +1,16 @@
-import "./globals.css";
+import "./global.css";
+import React from "react";
 
 export const metadata = {
-  title: "Bingio",
-  description: "Emotion-aware movie & series recommendation assistant",
+  title: "Chat with Bingio",
+  description: "Emotion-aware movie & series recommendations — BINGIO",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <div className="root">
-          {children}
-        </div>
+        {children}
       </body>
     </html>
   );
